@@ -77,7 +77,7 @@ def _coingecko_market_chart(
             data = r.json()
             prices = data.get("prices", [])
             if not prices:
-                raise RuntimeError(f"Aucune donnée reçue pour {coin_id}")
+                raise RuntimeError(f"no data received for  {coin_id}")
 
             df = pd.DataFrame(prices, columns=["ts_ms", "price"])
             df["datetime"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True).dt.tz_convert(None)

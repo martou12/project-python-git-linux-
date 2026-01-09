@@ -34,7 +34,7 @@ def _window_last_24h(prices: pd.DataFrame) -> pd.DataFrame:
     start = end - timedelta(hours=24)
     w = prices.loc[prices.index >= start]
     if len(w) < 5:
-        raise RuntimeError("Pas assez de points sur les dernières 24h.")
+        raise RuntimeError("not enough points on 24h")
     return w
 
 

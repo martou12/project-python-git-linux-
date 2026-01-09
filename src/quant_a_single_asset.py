@@ -35,7 +35,7 @@ def _momentum(prices: pd.Series, lookback: int = 20) -> tuple[pd.Series, pd.Seri
     - on shift le signal pour éviter look-ahead
     """
     if lookback < 1:
-        raise ValueError("lookback doit être >= 1")
+        raise ValueError("lookback must be >= 1")
 
     ret_lb = prices / prices.shift(lookback) - 1.0
     signal = (ret_lb > 0).astype(float)
@@ -56,7 +56,7 @@ def _sma_crossover(prices: pd.Series, short: int = 10, long: int = 30) -> tuple[
     - shift pour éviter look-ahead
     """
     if short < 1 or long < 2 or short >= long:
-        raise ValueError("Paramètres SMA invalides (il faut 1 <= short < long)")
+        raise ValueError("Paramètres SMA not valid (we nedd 1 <= short < long)")
 
     sma_s = prices.rolling(short).mean()
     sma_l = prices.rolling(long).mean()
@@ -85,7 +85,7 @@ def build_single_asset_result(
     prices = resample_price(prices_raw, periodicity)
 
     if len(prices) < 10:
-        raise RuntimeError("Pas assez de points pour backtester (augmente days ou mets periodicity=raw).")
+        raise RuntimeError("not enough points for  backtesting (increase days ou put periodicity=raw).")
 
     params: dict = {"periodicity": periodicity, "days": days}
 
@@ -99,7 +99,7 @@ def build_single_asset_result(
         equity, pos = _sma_crossover(prices, short=sma_short, long=sma_long)
         params.update({"sma_short": sma_short, "sma_long": sma_long})
     else:
-        raise ValueError(f"Stratégie inconnue: {strategy}")
+        raise ValueError(f"unknown strategy: {strategy}")
 
     return SingleAssetResult(
         asset_id=asset_id,
