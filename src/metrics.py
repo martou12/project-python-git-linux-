@@ -5,6 +5,7 @@ import pandas as pd
 
 
 def _periods_per_year(index: pd.DatetimeIndex) -> float:
+    """Estimate the number of periods per year from a datetime index using the median time step."""
     if len(index) < 3:
         return 0.0
     dt = pd.Series(index).diff().dropna().median()
@@ -15,6 +16,7 @@ def _periods_per_year(index: pd.DatetimeIndex) -> float:
 
 
 def max_drawdown(equity: pd.Series) -> float:
+    """Compute max drawdown (minimum of drawdown series)."""
     if equity is None or equity.empty:
         return 0.0
     peak = equity.cummax()
@@ -23,6 +25,7 @@ def max_drawdown(equity: pd.Series) -> float:
 
 
 def drawdown_series(equity: pd.Series) -> pd.Series:
+    """Return the full drawdown series."""
     if equity is None or equity.empty:
         return pd.Series(dtype=float)
     peak = equity.cummax()
@@ -33,8 +36,19 @@ def drawdown_series(equity: pd.Series) -> pd.Series:
 
 def compute_metrics(equity: pd.Series, rf_annual: float = 0.0) -> dict:
     """
-    equity: valeur cumulée (base 100)
-    rf_annual: taux sans risque annuel (ex 0.02)
+    Compute performance metrics from an equity curve (base 100).
+
+    Parameters
+    ----------
+    equity : pd.Series
+        Cumulative value series (e.g., base 100).
+    rf_annual : float
+        Annual risk-free rate (e.g., 0.02).
+
+    Returns
+    -------
+    dict
+        total_return, cagr, ann_vol, sharpe, sortino, calmar, max_dd
     """
     if equity is None or equity.empty or len(equity) < 5:
         return {
@@ -49,6 +63,7 @@ def compute_metrics(equity: pd.Series, rf_annual: float = 0.0) -> dict:
 
     equity = equity.sort_index()
     rets = equity.pct_change().dropna()
+
     if rets.empty:
         mdd = max_drawdown(equity)
         return {
@@ -80,11 +95,11 @@ def compute_metrics(equity: pd.Series, rf_annual: float = 0.0) -> dict:
 
     ann_vol = float(rets.std(ddof=1) * np.sqrt(ppy)) if rets.std(ddof=1) > 0 else 0.0
 
-    # Sharpe (avec rf annuel)
+    # Sharpe (using annual risk-free rate)
     excess = cagr - float(rf_annual)
     sharpe = float(excess / ann_vol) if ann_vol > 0 else 0.0
 
-    # Sortino
+    # Sortino (downside deviation)
     downside = rets[rets < 0]
     dd_std = float(downside.std(ddof=1) * np.sqrt(ppy)) if len(downside) > 1 else 0.0
     sortino = float(excess / dd_std) if dd_std > 0 else 0.0
@@ -104,6 +119,9 @@ def compute_metrics(equity: pd.Series, rf_annual: float = 0.0) -> dict:
 
 
 def open_close_return_24h(price: pd.Series) -> dict:
+    """
+    Approximate open/close/return over the last 24 hours based on available timestamps.
+    """
     s = price.dropna().sort_index()
     if s.empty:
         return {"open_24h": 0.0, "close_24h": 0.0, "return_24h": 0.0}
@@ -123,20 +141,38 @@ def open_close_return_24h(price: pd.Series) -> dict:
 
 
 def realized_vol(price: pd.Series) -> dict:
+    """
+    Realized volatility over the available window:
+    - vol_step: std of log-returns at the data frequency
+    - ann_vol_est: annualized estimate using inferred periods/year
+    """
     s = price.dropna().sort_index()
     lr = np.log(s).diff().dropna()
+
     if lr.empty:
         return {"vol_step": 0.0, "ann_vol_est": 0.0}
 
     vol_step = float(lr.std(ddof=1))
     ppy = _periods_per_year(s.index)
     ann_vol_est = float(vol_step * np.sqrt(ppy)) if ppy > 0 else 0.0
+
     return {"vol_step": vol_step, "ann_vol_est": ann_vol_est}
 
 
 def trade_stats(position: pd.Series) -> dict:
     """
-    position: série en {-1,0,1} ou [0,1]
+    Compute basic trading activity metrics.
+
+    Parameters
+    ----------
+    position : pd.Series
+        Position series in {-1, 0, 1} or [0, 1].
+
+    Returns
+    -------
+    dict
+        trades: number of position changes (signal changes)
+        turnover: sum(|Δposition|)
     """
     if position is None or position.empty:
         return {"trades": 0, "turnover": 0.0}
@@ -145,4 +181,5 @@ def trade_stats(position: pd.Series) -> dict:
     dp = p.diff().abs().fillna(0.0)
     trades = int((dp > 0).sum())
     turnover = float(dp.sum())
+
     return {"trades": trades, "turnover": turnover}
