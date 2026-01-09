@@ -47,7 +47,7 @@ def _open_close_and_return_24h(series: pd.Series) -> dict:
 
 
 def _realized_vol(series: pd.Series) -> dict:
-    # Vol réalisée sur la fenêtre (std des log-returns) + annualisation approximative selon la granularité
+    # Vol realized on the window (std of log-returns) + approximative annuzialisation 
     s = series.dropna()
     lr = np.log(s).diff().dropna()
     if lr.empty:
