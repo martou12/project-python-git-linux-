@@ -11,7 +11,7 @@ import time
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
-# CoinGecko IDs (pas besoin de clé API)
+# CoinGecko IDs (No API key required)
 ASSET_MAP = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -26,24 +26,27 @@ COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 @dataclass(frozen=True)
 class PortfolioResult:
-    prices: pd.DataFrame          # prix des assets
-    portfolio: pd.Series          # valeur portefeuille (base 100)
-    returns: pd.Series            # rendements portefeuille
-    corr: pd.DataFrame            # corrélation des rendements assets
+    """
+    Container for the results of the portfolio simulation.
+    """
+    prices: pd.DataFrame          # Individual asset prices
+    portfolio: pd.Series          # Portfolio value (Base 100)
+    returns: pd.Series            # Portfolio periodic returns
+    corr: pd.DataFrame            # Correlation matrix of asset returns
 
 
 def _coingecko_market_chart(
     coin_id: str,
     vs: str = "eur",
     days: int = 30,
-    max_age_sec: int = 300,      # cache 5 min
+    max_age_sec: int = 300,      # Cache duration (default: 5 min)
     retries: int = 5,
 ) -> pd.Series:
     """
     Fetch CoinGecko market_chart with:
-    - local CSV cache (data/)
-    - retry + exponential backoff on 429/temporary errors
-    - fallback to cached CSV if API is rate-limited
+    - local CSV cache (stored in data/)
+    - retry + exponential backoff logic for 429/temporary errors
+    - fallback to cached CSV if the API is strictly rate-limited
     """
     cache_path = DATA_DIR / f"{coin_id}_{vs}_{days}d.csv"
 
@@ -64,7 +67,7 @@ def _coingecko_market_chart(
         try:
             r = requests.get(url, params=params, timeout=20)
 
-            # Rate limit (429)
+            # Handle Rate Limit (HTTP 429)
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
                 sleep_s = float(retry_after) if retry_after else (2 ** attempt)
@@ -77,20 +80,21 @@ def _coingecko_market_chart(
             data = r.json()
             prices = data.get("prices", [])
             if not prices:
-                raise RuntimeError(f"no data received for  {coin_id}")
+                raise RuntimeError(f"No data received for {coin_id}")
 
             df = pd.DataFrame(prices, columns=["ts_ms", "price"])
+            # Convert timestamp (ms) to datetime
             df["datetime"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True).dt.tz_convert(None)
 
             s = df.set_index("datetime")["price"].sort_index()
 
-            # align index to minute to reduce timestamp mismatch
+            # Align index to the minute to reduce timestamp mismatch across assets
             s.index = s.index.floor("1min")
             s = s[~s.index.duplicated(keep="last")]
 
             s.name = coin_id
 
-            # save cache
+            # Save to local cache
             s.to_frame("price").to_csv(cache_path)
 
             return s
@@ -99,7 +103,7 @@ def _coingecko_market_chart(
             last_err = e
             time.sleep(min(2 ** attempt, 10.0))
 
-    # 3) Final fallback: use cache even if old
+    # 3) Final fallback: use cache even if it is stale (better than crashing)
     if cache_path.exists():
         df = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime")
         s = df["price"].astype(float)
@@ -110,60 +114,69 @@ def _coingecko_market_chart(
 
 
 def fetch_prices_multi(coin_ids: list[str], vs: str = "eur", days: int = 30) -> pd.DataFrame:
+    """
+    Fetch historical prices for multiple assets and align them into a single DataFrame.
+    """
     series = []
     for cid in coin_ids:
         s = _coingecko_market_chart(cid, vs=vs, days=days)
         series.append(s)
 
-        # Sauvegarde locale (utile + “pro”)
+        # Local backup (useful + professional practice)
         out = DATA_DIR / f"{cid}_{vs}_{days}d.csv"
         s.to_frame("price").to_csv(out)
 
     prices = pd.concat(series, axis=1).sort_index()
 
-    # Alignement robuste : on propage la dernière valeur connue
-    # puis on supprime seulement les premières lignes incomplètes
+    # Robust alignment: forward fill the last known value to fill gaps,
+    # then drop only the initial rows that are still incomplete.
     prices = prices.ffill().dropna()
 
     return prices
 
 
-    
-
-
 def compute_portfolio(prices: pd.DataFrame, weights: np.ndarray, rebalance: str = "None") -> pd.Series:
     """
-    Simulation simple :
-    - capital initial = 100
-    - holdings constants, rebalancing optionnel (Daily/Weekly/Monthly)
+    Portfolio Simulation:
+    - Initial Capital = 100
+    - Constant holdings, with optional rebalancing (Daily/Weekly/Monthly)
     """
     if prices.empty:
-        raise ValueError("prices est vide")
+        raise ValueError("Price dataframe is empty")
 
     w = np.array(weights, dtype=float)
     if (w < 0).any():
-        raise ValueError("Les poids doivent être >= 0")
+        raise ValueError("Weights must be >= 0")
     if w.sum() == 0:
-        raise ValueError("Somme des poids = 0")
+        raise ValueError("Sum of weights cannot be 0")
+    
+    # Normalize weights just in case
     w = w / w.sum()
 
     capital = 100.0
-    holdings = (capital * w) / prices.iloc[0].values  # quantité de chaque asset
+    # Calculate initial quantity of each asset
+    holdings = (capital * w) / prices.iloc[0].values
     values = [capital]
 
     idx = prices.index
     for t in range(1, len(prices)):
+        # Calculate current portfolio value based on holdings
         capital = float(np.sum(holdings * prices.iloc[t].values))
         values.append(capital)
 
+        # Rebalancing logic
         if rebalance != "None" and t < len(prices) - 1:
             if _should_rebalance(idx[t], idx[t + 1], rebalance):
+                # Reset holdings to match target weights based on current capital
                 holdings = (capital * w) / prices.iloc[t].values
 
     return pd.Series(values, index=prices.index, name="portfolio_value")
 
 
 def _should_rebalance(dt_now: pd.Timestamp, dt_next: pd.Timestamp, freq: str) -> bool:
+    """
+    Helper to detect if a rebalancing event should occur between two timestamps.
+    """
     if freq == "Daily":
         return dt_now.date() != dt_next.date()
     if freq == "Weekly":
@@ -174,11 +187,14 @@ def _should_rebalance(dt_now: pd.Timestamp, dt_next: pd.Timestamp, freq: str) ->
 
 
 def compute_metrics(portfolio: pd.Series) -> dict:
+    """
+    Calculate standard financial metrics: Annualized Return, Volatility, Sharpe, Max Drawdown.
+    """
     rets = portfolio.pct_change().dropna()
     if rets.empty:
         return {"ann_return": 0.0, "ann_vol": 0.0, "sharpe": 0.0, "max_dd": 0.0}
 
-    # annualisation basée sur le pas de temps médian
+    # Annualization based on the median time step of the data
     dt = portfolio.index.to_series().diff().dropna().median()
     seconds = max(dt.total_seconds(), 1.0)
     periods_per_year = (365.0 * 24 * 3600) / seconds
@@ -190,7 +206,7 @@ def compute_metrics(portfolio: pd.Series) -> dict:
     ann_vol = sigma * np.sqrt(periods_per_year)
     sharpe = 0.0 if ann_vol == 0 else (mu * periods_per_year) / (sigma * np.sqrt(periods_per_year))
 
-    # max drawdown
+    # Max Drawdown calculation
     roll_max = portfolio.cummax()
     dd = (portfolio / roll_max) - 1.0
     max_dd = float(dd.min())
@@ -204,9 +220,15 @@ def compute_metrics(portfolio: pd.Series) -> dict:
 
 
 def build_portfolio_result(asset_ids: list[str], vs: str, days: int, weights: np.ndarray, rebalance: str) -> PortfolioResult:
+    """
+    Main factory function to build the Portfolio Result object.
+    """
     prices = fetch_prices_multi(asset_ids, vs=vs, days=days)
     port = compute_portfolio(prices, weights=weights, rebalance=rebalance)
+    
     asset_returns = prices.pct_change().dropna()
     corr = asset_returns.corr()
+    
     port_returns = port.pct_change().dropna()
+    
     return PortfolioResult(prices=prices, portfolio=port, returns=port_returns, corr=corr)
