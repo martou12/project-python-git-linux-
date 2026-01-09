@@ -30,15 +30,17 @@ LOGS_DIR.mkdir(exist_ok=True)
 
 
 def _window_last_24h(prices: pd.DataFrame) -> pd.DataFrame:
+    """Extracts the last 24 hours of data from the dataframe."""
     end = prices.index.max()
     start = end - timedelta(hours=24)
     w = prices.loc[prices.index >= start]
     if len(w) < 5:
-        raise RuntimeError("not enough points on 24h")
+        raise RuntimeError("Not enough data points for the 24h window")
     return w
 
 
 def _open_close_and_return_24h(series: pd.Series) -> dict:
+    """Computes Open, Close, and Return over the selected window."""
     s = series.dropna()
     o = float(s.iloc[0])
     c = float(s.iloc[-1])
@@ -47,18 +49,27 @@ def _open_close_and_return_24h(series: pd.Series) -> dict:
 
 
 def _realized_vol(series: pd.Series) -> dict:
-    # Vol realized on the window (std of log-returns) + approximative annuzialisation 
+    """
+    Computes realized volatility on the window (std of log-returns) 
+    + approximate annualization.
+    """
     s = series.dropna()
     lr = np.log(s).diff().dropna()
     if lr.empty:
         return {"vol_24h": 0.0, "ann_vol_est": 0.0}
 
-    vol_24h = float(lr.std(ddof=1))  # volatilité “par pas de temps”
-    # Estimation annualisée en déduisant le pas de temps médian
+    vol_24h = float(lr.std(ddof=1))  # Volatility "per time step"
+    
+    # Annualized estimation by inferring the median time step
     dt = s.index.to_series().diff().dropna().median()
-    seconds = max(dt.total_seconds(), 1.0)
-    periods_per_year = (365.0 * 24 * 3600) / seconds
+    if pd.isna(dt):
+        seconds = 24 * 3600  # Default fallback
+    else:
+        seconds = max(dt.total_seconds(), 1.0)
+        
+    periods_per_year = (365.25 * 24 * 3600) / seconds
     ann_vol_est = float(lr.std(ddof=1) * np.sqrt(periods_per_year))
+    
     return {"vol_24h": vol_24h, "ann_vol_est": ann_vol_est}
 
 
