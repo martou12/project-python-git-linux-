@@ -15,7 +15,7 @@ st_autorefresh(interval=5 * 60 * 1000, key="portfolio_refresh")
 
 st.title("Portfolio Management (Quant B) — Multi-Assets")
 
-# --- Sidebar Settings ---
+#  Sidebar Settings 
 with st.sidebar:
     st.header("Settings")
     vs = st.selectbox("Currency", ["eur", "usd"], index=0)
@@ -56,7 +56,7 @@ except Exception as e:
     st.error(f"Data Source Error: {e}")
     st.stop()
 
-# --- KPI Section with Deltas ---
+#  KPI Section with Deltas 
 m = compute_metrics(res.portfolio)
 
 # Calculate 24h variation for the portfolio to show a Delta
@@ -79,11 +79,11 @@ c5.metric("Max Drawdown", f"{m['max_dd']*100:.2f}%", delta_color="inverse") # Lo
 
 st.caption(f"Last update: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} (5 min auto-refresh)")
 
-# --- Layout with Tabs (Professional UX) ---
-tab1, tab2 = st.tabs(["📈 Visualization & Analysis", "📄 Raw Data"])
+#  Layout with Tabs (Professional UX) 
+tab1, tab2 = st.tabs([" Visualization & Analysis", " Raw Data"])
 
 with tab1:
-    # --- Main chart: Normalized prices + Portfolio performance
+    #  Main chart: Normalized prices + Portfolio performance
     st.subheader("Performance Comparison")
     norm_prices = (res.prices / res.prices.iloc[0]) * 100.0
 
@@ -110,13 +110,13 @@ with tab1:
     # Hide the ugly toolbar
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    # --- Correlation Matrix
+    #  Correlation Matrix
     st.subheader("Correlation Matrix (Returns)")
     corr_fig = px.imshow(res.corr, aspect="auto", text_auto=True, color_continuous_scale='RdBu_r')
     st.plotly_chart(corr_fig, use_container_width=True, config={"displayModeBar": False})
 
 with tab2:
-    # --- Raw Data Table
+    #  Raw Data Table
     st.subheader("Latest Computed Values")
     last = res.prices.tail(50).copy()
     last["portfolio_value"] = res.portfolio.tail(50)
