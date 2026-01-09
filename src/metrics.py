@@ -1,134 +1,185 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
-def compute_metrics(series: pd.Series, rf_annual: float = 0.0) -> dict:
+
+def _periods_per_year(index: pd.DatetimeIndex) -> float:
+    """Estimate the number of periods per year from a datetime index using the median time step."""
+    if len(index) < 3:
+        return 0.0
+    dt = pd.Series(index).diff().dropna().median()
+    if pd.isna(dt):
+        return 0.0
+    seconds = max(float(dt.total_seconds()), 1.0)
+    return (365.0 * 24 * 3600) / seconds
+
+
+def max_drawdown(equity: pd.Series) -> float:
+    """Compute max drawdown (minimum of drawdown series)."""
+    if equity is None or equity.empty:
+        return 0.0
+    peak = equity.cummax()
+    dd = (equity / peak) - 1.0
+    return float(dd.min())
+
+
+def drawdown_series(equity: pd.Series) -> pd.Series:
+    """Return the full drawdown series."""
+    if equity is None or equity.empty:
+        return pd.Series(dtype=float)
+    peak = equity.cummax()
+    dd = (equity / peak) - 1.0
+    dd.name = "drawdown"
+    return dd
+
+
+def compute_metrics(equity: pd.Series, rf_annual: float = 0.0) -> dict:
     """
-    Calculates standard financial metrics.
-    Returns a dictionary with GUARANTEED keys for the interface to avoid KeyErrors.
+    Compute performance metrics from an equity curve (base 100).
+
+    Parameters
+    ----------
+    equity : pd.Series
+        Cumulative value series (e.g., base 100).
+    rf_annual : float
+        Annual risk-free rate (e.g., 0.02).
+
+    Returns
+    -------
+    dict
+        total_return, cagr, ann_vol, sharpe, sortino, calmar, max_dd
     """
-    # 1. Safety check
-    if series.empty or len(series) < 2:
+    if equity is None or equity.empty or len(equity) < 5:
         return {
-            "ann_return": 0.0,
+            "total_return": 0.0,
             "cagr": 0.0,
             "ann_vol": 0.0,
             "sharpe": 0.0,
+            "sortino": 0.0,
+            "calmar": 0.0,
             "max_dd": 0.0,
-            "sortino": 0.0
         }
 
-    # 2. Compute returns
-    rets = series.pct_change().dropna()
+    equity = equity.sort_index()
+    rets = equity.pct_change().dropna()
+
     if rets.empty:
-        return {"ann_return": 0.0, "cagr": 0.0, "ann_vol": 0.0, "sharpe": 0.0, "max_dd": 0.0}
+        mdd = max_drawdown(equity)
+        return {
+            "total_return": float(equity.iloc[-1] / equity.iloc[0] - 1.0),
+            "cagr": 0.0,
+            "ann_vol": 0.0,
+            "sharpe": 0.0,
+            "sortino": 0.0,
+            "calmar": 0.0,
+            "max_dd": mdd,
+        }
 
-    # 3. Annualisation
-    dt = series.index.to_series().diff().dropna().median()
-    if pd.isna(dt):
-        seconds = 24 * 3600
-    else:
-        seconds = max(dt.total_seconds(), 1.0)
-    
-    periods_per_year = (365.25 * 24 * 3600) / seconds
+    ppy = _periods_per_year(equity.index)
+    if ppy <= 0:
+        mdd = max_drawdown(equity)
+        return {
+            "total_return": float(equity.iloc[-1] / equity.iloc[0] - 1.0),
+            "cagr": 0.0,
+            "ann_vol": 0.0,
+            "sharpe": 0.0,
+            "sortino": 0.0,
+            "calmar": 0.0,
+            "max_dd": mdd,
+        }
 
-    # --- CAGR / Annual Return ---
-    total_ret = (series.iloc[-1] / series.iloc[0]) - 1.0
-    duration_years = (series.index[-1] - series.index[0]).total_seconds() / (365.25 * 24 * 3600)
-    
-    if duration_years > 0:
-        ann_return = (series.iloc[-1] / series.iloc[0]) ** (1 / duration_years) - 1.0
-    else:
-        ann_return = 0.0
+    n = len(rets)
+    total_return = float(equity.iloc[-1] / equity.iloc[0] - 1.0)
+    cagr = float((equity.iloc[-1] / equity.iloc[0]) ** (ppy / n) - 1.0)
 
-    # --- Volatility ---
-    ann_vol = rets.std(ddof=1) * np.sqrt(periods_per_year)
+    ann_vol = float(rets.std(ddof=1) * np.sqrt(ppy)) if rets.std(ddof=1) > 0 else 0.0
 
-    # --- Sharpe Ratio ---
-    mu = rets.mean() * periods_per_year
-    sigma = ann_vol
-    if sigma > 1e-9:
-        sharpe = (mu - rf_annual) / sigma
-    else:
-        sharpe = 0.0
+    # Sharpe (using annual risk-free rate)
+    excess = cagr - float(rf_annual)
+    sharpe = float(excess / ann_vol) if ann_vol > 0 else 0.0
 
-    # --- Max Drawdown ---
-    roll_max = series.cummax()
-    drawdown = (series / roll_max) - 1.0
-    max_dd = float(drawdown.min())
+    # Sortino (downside deviation)
+    downside = rets[rets < 0]
+    dd_std = float(downside.std(ddof=1) * np.sqrt(ppy)) if len(downside) > 1 else 0.0
+    sortino = float(excess / dd_std) if dd_std > 0 else 0.0
+
+    mdd = max_drawdown(equity)
+    calmar = float(cagr / abs(mdd)) if mdd < 0 else 0.0
 
     return {
-        "ann_return": ann_return,
-        "cagr": ann_return,      # Compatible alias
+        "total_return": total_return,
+        "cagr": cagr,
         "ann_vol": ann_vol,
         "sharpe": sharpe,
-        "max_dd": max_dd,
-        "sortino": 0.0
+        "sortino": sortino,
+        "calmar": calmar,
+        "max_dd": mdd,
     }
+
+
+def open_close_return_24h(price: pd.Series) -> dict:
+    """
+    Approximate open/close/return over the last 24 hours based on available timestamps.
+    """
+    s = price.dropna().sort_index()
+    if s.empty:
+        return {"open_24h": 0.0, "close_24h": 0.0, "return_24h": 0.0}
+
+    end = s.index.max()
+    start = end - pd.Timedelta(hours=24)
+    w = s.loc[s.index >= start]
+
+    if len(w) < 2:
+        o = float(s.iloc[0])
+        c = float(s.iloc[-1])
+        return {"open_24h": o, "close_24h": c, "return_24h": float(c / o - 1.0)}
+
+    o = float(w.iloc[0])
+    c = float(w.iloc[-1])
+    return {"open_24h": o, "close_24h": c, "return_24h": float(c / o - 1.0)}
+
+
+def realized_vol(price: pd.Series) -> dict:
+    """
+    Realized volatility over the available window:
+    - vol_step: std of log-returns at the data frequency
+    - ann_vol_est: annualized estimate using inferred periods/year
+    """
+    s = price.dropna().sort_index()
+    lr = np.log(s).diff().dropna()
+
+    if lr.empty:
+        return {"vol_step": 0.0, "ann_vol_est": 0.0}
+
+    vol_step = float(lr.std(ddof=1))
+    ppy = _periods_per_year(s.index)
+    ann_vol_est = float(vol_step * np.sqrt(ppy)) if ppy > 0 else 0.0
+
+    return {"vol_step": vol_step, "ann_vol_est": ann_vol_est}
 
 
 def trade_stats(position: pd.Series) -> dict:
     """
-    Calculates basic trade statistics (Count, etc.).
-    RESTORED: Required by Quant A logic.
+    Compute basic trading activity metrics.
+
+    Parameters
+    ----------
+    position : pd.Series
+        Position series in {-1, 0, 1} or [0, 1].
+
+    Returns
+    -------
+    dict
+        trades: number of position changes (signal changes)
+        turnover: sum(|Δposition|)
     """
-    if position.empty:
-        return {"total_trades": 0, "win_rate": 0.0}
+    if position is None or position.empty:
+        return {"trades": 0, "turnover": 0.0}
 
-    # Count every time the position changes (signal change)
-    trades = position.diff().fillna(0.0)
-    # Count non-zero changes
-    num_trades = int((trades != 0).sum())
+    p = position.fillna(0.0).astype(float)
+    dp = p.diff().abs().fillna(0.0)
+    trades = int((dp > 0).sum())
+    turnover = float(dp.sum())
 
-    return {
-        "total_trades": num_trades,
-        "win_rate": 0.0 # Placeholder to prevent errors if friend uses it
-    }
-
-
-def open_close_return_24h(prices: pd.Series) -> dict:
-    """
-    Calculates statistics for the last 24h.
-    """
-    if prices.empty:
-        return {"open_24h": 0.0, "close_24h": 0.0, "return_24h": 0.0}
-    
-    last_ts = prices.index[-1]
-    cutoff = last_ts - pd.Timedelta(hours=24)
-    
-    close_val = float(prices.iloc[-1])
-    
-    past = prices[prices.index <= cutoff]
-    if past.empty:
-        open_val = float(prices.iloc[0])
-    else:
-        open_val = float(past.iloc[-1])
-        
-    ret_24h = (close_val - open_val) / open_val if open_val != 0 else 0.0
-    
-    return {
-        "open_24h": open_val,
-        "close_24h": close_val,
-        "return_24h": ret_24h
-    }
-
-
-def realized_vol(prices: pd.Series, window: int = 20) -> dict:
-    """
-    Simple realized volatility over the last X points.
-    """
-    rets = prices.pct_change().dropna()
-    if len(rets) < window:
-        vol_est = rets.std() * np.sqrt(365*24)
-    else:
-        vol_est = rets.tail(window).std() * np.sqrt(365*24)
-        
-    return {"ann_vol_est": 0.0 if pd.isna(vol_est) else vol_est}
-
-
-def drawdown_series(equity: pd.Series) -> pd.Series:
-    """
-    Calculates the drawdown series.
-    """
-    roll_max = equity.cummax()
-    dd = (equity / roll_max) - 1.0
-    return dd
+    return {"trades": trades, "turnover": turnover}

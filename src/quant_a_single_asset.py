@@ -28,8 +28,15 @@ def _apply_costs_and_build_equity(
     slippage_bps: float = 0.0,
 ) -> pd.Series:
     """
-    equity_t = equity_{t-1} * (1 + leverage * pos_{t-1} * ret_t - turnover_t * cost)
-    cost in bps applied on turnover (abs change in position)
+    Build an equity curve (base 100) with basic transaction costs.
+
+    Model:
+        equity_t = equity_{t-1} * (1 + leverage * pos_{t-1} * ret_t - turnover_t * cost_rate)
+
+    Where:
+        - ret_t is the asset return at t
+        - turnover_t = |pos_t - pos_{t-1}|
+        - cost_rate = (fee_bps + slippage_bps) / 10000
     """
     prices = prices.sort_index()
     rets = prices.pct_change().fillna(0.0)
@@ -46,17 +53,27 @@ def _apply_costs_and_build_equity(
 
 
 def _buy_and_hold(prices: pd.Series) -> pd.Series:
+    """Buy & Hold: always long (position = 1)."""
     return pd.Series(1.0, index=prices.index, name="position")
 
 
 def _momentum(prices: pd.Series, lookback: int, allow_short: bool) -> pd.Series:
+    """
+    Simple momentum signal:
+        - compute lookback return
+        - if allow_short:
+            position = sign(lookback_return) in {-1, 0, +1}
+          else:
+            position = 1 if lookback_return > 0 else 0
+        - shift by 1 step to avoid look-ahead
+    """
     if lookback < 1:
         raise ValueError("lookback must be >= 1")
 
     ret_lb = prices / prices.shift(lookback) - 1.0
 
     if allow_short:
-        sig = np.sign(ret_lb).astype(float)     # -1 / 0 / +1
+        sig = np.sign(ret_lb).astype(float)  # -1 / 0 / +1
         pos = pd.Series(sig, index=prices.index).shift(1).fillna(0.0)
     else:
         pos = (ret_lb > 0).astype(float).shift(1).fillna(0.0)
@@ -66,8 +83,20 @@ def _momentum(prices: pd.Series, lookback: int, allow_short: bool) -> pd.Series:
 
 
 def _sma_crossover(prices: pd.Series, short: int, long: int, allow_short: bool):
+    """
+    SMA crossover signal:
+        - compute SMA(short) and SMA(long)
+        - if allow_short:
+            position = +1 if SMA_short > SMA_long else -1
+          else:
+            position = 1 if SMA_short > SMA_long else 0
+        - shift by 1 step to avoid look-ahead
+
+    Returns:
+        (position, sma_short_series, sma_long_series)
+    """
     if short < 1 or long < 2 or short >= long:
-        raise ValueError("Need 1 <= short < long")
+        raise ValueError("Invalid SMA parameters: require 1 <= short < long")
 
     sma_s = prices.rolling(short).mean()
     sma_l = prices.rolling(long).mean()
@@ -96,11 +125,19 @@ def build_single_asset_result(
     fee_bps: float = 0.0,
     slippage_bps: float = 0.0,
 ) -> SingleAssetResult:
-    (prices_raw, meta) = fetch_price_series(asset_id, vs=vs, days=days, return_meta=True)
+    """
+    End-to-end pipeline:
+        1) fetch raw price series (CoinGecko)
+        2) resample
+        3) generate position signal (strategy)
+        4) build equity curve with costs + leverage
+        5) attach meta: data source/cache + trade stats (+ SMA series for UI)
+    """
+    prices_raw, meta = fetch_price_series(asset_id, vs=vs, days=days, return_meta=True)
     prices = resample_price(prices_raw, periodicity)
 
     if len(prices) < 20:
-        raise RuntimeError("Not enough points. Increase days or use periodicity=raw")
+        raise RuntimeError("Not enough data points. Increase days or use periodicity='raw'.")
 
     params = {
         "days": int(days),
@@ -133,10 +170,10 @@ def build_single_asset_result(
         slippage_bps=float(slippage_bps),
     )
 
-    # trade stats + keep meta about source/cache
+    # Merge data meta (source/cache) with trading activity stats
     meta = {**meta, **trade_stats(pos)}
 
-    # SMA overlay for UI (optional)
+    # Optional: attach SMA series for UI overlay
     if sma_s is not None and sma_l is not None:
         meta = {**meta, "sma_short": sma_s, "sma_long": sma_l}
 
@@ -153,14 +190,26 @@ def build_single_asset_result(
 
 
 def simple_linear_forecast(series: pd.Series, horizon: int = 20, fit_last: int = 200) -> pd.DataFrame:
+    """
+    Simple optional forecasting helper:
+        - linear regression on time over the last `fit_last` points
+        - produces yhat + a naive confidence band +/- 1.96 * std(residuals)
+
+    Returns
+    -------
+    pd.DataFrame
+        Index: future timestamps (based on median step)
+        Columns: yhat, lo, hi
+    """
     s = series.dropna().sort_index()
     if len(s) < 20:
-        raise ValueError("Series too short for forecast")
+        raise ValueError("Series too short for forecasting")
 
     s_fit = s.iloc[-min(len(s), fit_last):]
     y = s_fit.values.astype(float)
     x = np.arange(len(y), dtype=float)
 
+    # Fit: y = a*x + b
     a, b = np.polyfit(x, y, deg=1)
     y_hat_fit = a * x + b
     resid = y - y_hat_fit

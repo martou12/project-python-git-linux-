@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import time
-import requests
-import pandas as pd
+from pathlib import Path
+from typing import Optional, Tuple
 
-# Define the local directory for caching CSV files
+import pandas as pd
+import requests
+
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
-# Base URL for CoinGecko API
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
-# Mapping between display names and CoinGecko API IDs
 ASSET_MAP = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -23,105 +21,165 @@ ASSET_MAP = {
     "Cardano (ADA)": "cardano",
 }
 
+_DEFAULT_HEADERS = {
+    "User-Agent": "project-python-git-linux (student dashboard)",
+    "Accept": "application/json",
+}
 
-def _coingecko_market_chart(
+
+def _read_cache(path: Path) -> Optional[pd.Series]:
+    """Read a cached CSV file and return a price series indexed by datetime."""
+    if not path.exists():
+        return None
+
+    df = pd.read_csv(path, parse_dates=["datetime"])
+    if df.empty or "price" not in df.columns:
+        return None
+
+    s = df.set_index("datetime")["price"].astype(float).sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    return s
+
+
+def _write_cache(path: Path, s: pd.Series) -> None:
+    """Write a price series to CSV cache."""
+    out = s.to_frame("price").reset_index().rename(columns={"index": "datetime"})
+    out.to_csv(path, index=False)
+
+
+def fetch_price_series(
     coin_id: str,
     vs: str = "eur",
     days: int = 30,
-    max_age_sec: int = 300,  # Cache duration (default: 5 minutes)
-    retries: int = 5,
-) -> pd.Series:
+    ttl_sec: int = 300,
+    retries: int = 6,
+    session: Optional[requests.Session] = None,
+    return_meta: bool = False,
+) -> pd.Series | Tuple[pd.Series, dict]:
     """
-    Fetch CoinGecko market_chart data:
-    - Checks for local CSV cache in data/ first.
-    - Implements retry logic + exponential backoff.
-    - Returns a pandas Series with a DateTime index.
+    Fetch CoinGecko `market_chart` price series with:
+    - disk cache (TTL default: 5 minutes),
+    - retry/backoff + 429 (rate limit) handling,
+    - fallback to stale cache if the API is unavailable.
+
+    Parameters
+    ----------
+    coin_id : str
+        CoinGecko coin id (e.g. "bitcoin", "ethereum").
+    vs : str
+        Quote currency ("eur" or "usd").
+    days : int
+        Number of days of historical data to fetch.
+    ttl_sec : int
+        Cache freshness TTL in seconds.
+    retries : int
+        Number of retry attempts on failures.
+    session : requests.Session | None
+        Optional pre-configured session.
+    return_meta : bool
+        If True, return (series, meta) where meta includes source/cache info.
+
+    Returns
+    -------
+    pd.Series OR (pd.Series, dict)
+        Price series indexed by datetime. If return_meta=True, also returns metadata.
     """
+    if vs not in {"eur", "usd"}:
+        raise ValueError("vs must be 'eur' or 'usd'")
+    if days <= 0:
+        raise ValueError("days must be > 0")
+
     cache_path = DATA_DIR / f"{coin_id}_{vs}_{days}d.csv"
 
-    # 1) Check for "fresh" cache
+    # 1) Fresh cache
     if cache_path.exists():
         age = time.time() - cache_path.stat().st_mtime
-        if age <= max_age_sec:
-            df = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime")
-            s = df["price"].astype(float)
-            s.name = coin_id
-            return s
+        if age <= ttl_sec:
+            s = _read_cache(cache_path)
+            if s is not None and len(s) > 2:
+                meta = {"source": "cache_fresh", "cache_path": str(cache_path), "age_sec": float(age)}
+                return (s, meta) if return_meta else s
 
-    # 2) If no cache, prepare API request
+    sess = session or requests.Session()
+    sess.headers.update(_DEFAULT_HEADERS)
+
     url = f"{COINGECKO_BASE}/coins/{coin_id}/market_chart"
-    params = {"vs_currency": vs, "days": days}
+    params = {"vs_currency": vs, "days": int(days)}
 
-    last_err = None
+    last_err: Optional[Exception] = None
+
+    # 2) API call with retry/backoff
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=20)
+            r = sess.get(url, params=params, timeout=25)
 
+            # rate limit handling
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
                 sleep_s = float(retry_after) if retry_after else (2 ** attempt)
                 time.sleep(min(sleep_s, 30.0))
-                last_err = requests.HTTPError(f"429 Too Many Requests (attempt {attempt+1})", response=r)
+                last_err = RuntimeError("CoinGecko rate limit (HTTP 429).")
                 continue
 
             r.raise_for_status()
             data = r.json()
             prices = data.get("prices", [])
-            
             if not prices:
-                raise RuntimeError(f"No data received for {coin_id}")
+                raise RuntimeError(f"No prices returned for coin_id='{coin_id}'")
 
             df = pd.DataFrame(prices, columns=["ts_ms", "price"])
             df["datetime"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True).dt.tz_convert(None)
+            s = df.set_index("datetime")["price"].astype(float).sort_index()
 
-            s = df.set_index("datetime")["price"].sort_index()
+            # Clean + align
             s.index = s.index.floor("1min")
             s = s[~s.index.duplicated(keep="last")]
-            s.name = coin_id
+            s = s.dropna()
 
-            s.to_frame("price").to_csv(cache_path)
-            return s
+            if len(s) < 5:
+                raise RuntimeError("Not enough data points returned by API.")
+
+            # Save cache
+            _write_cache(cache_path, s)
+
+            meta = {"source": "api", "cache_path": str(cache_path), "age_sec": 0.0}
+            return (s, meta) if return_meta else s
 
         except Exception as e:
             last_err = e
             time.sleep(min(2 ** attempt, 10.0))
 
-    # 3) Fallback to stale cache
-    if cache_path.exists():
-        df = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime")
-        s = df["price"].astype(float)
-        s.name = coin_id
-        return s
+    # 3) Fallback: stale cache
+    s = _read_cache(cache_path)
+    if s is not None and len(s) > 2:
+        age = time.time() - cache_path.stat().st_mtime
+        meta = {"source": "cache_stale", "cache_path": str(cache_path), "age_sec": float(age)}
+        return (s, meta) if return_meta else s
 
-    raise last_err
-
-
-def fetch_price_series(coin_id: str, vs: str = "eur", days: int = 30, return_meta: bool = False, **kwargs):
-    """
-    Public wrapper to get a clean price series.
-    PATCHED: Compatible with both Quant A (needs meta) and Quant B (needs just prices).
-    """
-    s = _coingecko_market_chart(coin_id, vs=vs, days=days)
-    s = s.dropna().astype(float)
-    
-    # Compatibility fix for your friend's code
-    if return_meta:
-        return s, {"source": "CoinGecko", "currency": vs, "days": days}
-        
-    return s
+    # 4) Nothing worked
+    raise last_err if last_err is not None else RuntimeError("Unknown error while fetching CoinGecko data.")
 
 
 def resample_price(s: pd.Series, rule: str) -> pd.Series:
     """
-    Robust resampling function (last value + forward fill).
+    Robust resampling:
+    - rule="raw": return original series
+    - otherwise: resample with last() + forward-fill.
+
+    Examples: "5min", "15min", "1H", "4H", "1D"
     """
-    if s.empty:
-        raise ValueError("Price series is empty")
-    
+    if s is None or s.empty:
+        raise ValueError("Empty price series")
+
+    s = s.sort_index()
+
     if rule == "raw":
         out = s.copy()
     else:
         out = s.resample(rule).last().ffill()
-    
+
     out = out.dropna()
+    if len(out) < 5:
+        raise RuntimeError("Not enough points after resampling")
+
     return out
