@@ -17,6 +17,7 @@ st_autorefresh(interval=5 * 60 * 1000, key="single_asset_refresh")
 
 st.title("Single Asset Analysis (Quant A) — Univariate")
 
+# --- Sidebar Settings ---
 with st.sidebar:
     st.header("Settings")
 
@@ -70,64 +71,80 @@ except Exception as e:
     st.error(f"Data/Backtest Error: {e}")
     st.stop()
 
+# --- Metrics Calculation ---
 price_now = float(res.prices.iloc[-1])
 kpi = compute_metrics(res.equity)
 oc = open_close_return_24h(res.prices)
 vol = realized_vol(res.prices)
 
-# --- KPI Metrics
+# --- KPIs Section with Deltas ---
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Current Price", f"{price_now:,.2f} {vs.upper()}")
+
+# Price with 24h variation delta
+c1.metric(
+    "Current Price", 
+    f"{price_now:,.2f} {vs.upper()}", 
+    delta=f"{oc['return_24h']*100:.2f}% (24h)"
+)
 c2.metric("Annualized Perf.", f"{kpi['ann_return']*100:.2f}%")
-c3.metric("Annualized Vol.", f"{kpi['ann_vol']*100:.2f}%")
+c3.metric("Annualized Vol.", f"{kpi['ann_vol']*100:.2f}%", delta_color="inverse") # Lower is usually safer
 c4.metric("Sharpe Ratio (rf=0)", f"{kpi['sharpe']:.2f}")
-c5.metric("Max Drawdown", f"{kpi['max_dd']*100:.2f}%")
+c5.metric("Max Drawdown", f"{kpi['max_dd']*100:.2f}%", delta_color="inverse") # Lower (closer to 0) is better
 
 st.caption(
     f"Last update: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} "
     f"(5 min auto-refresh) — strategy: {res.strategy_name} — params: {res.params}"
 )
 
-# --- Main chart: raw price + strategy equity
-fig = make_subplots(specs=[[{"secondary_y": True}]])
-fig.add_trace(
-    go.Scatter(x=res.prices.index, y=res.prices.values, mode="lines", name=f"Price ({label})"),
-    secondary_y=False,
-)
-fig.add_trace(
-    go.Scatter(x=res.equity.index, y=res.equity.values, mode="lines", name=f"Strategy Value (Base 100)"),
-    secondary_y=True,
-)
+# --- Layout with Tabs ---
+tab1, tab2 = st.tabs(["📈 Visualization & Strategy", "📄 Raw Data & Stats"])
 
-# Optional Linear Forecast
-if enable_forecast:
-    try:
-        fc = simple_linear_forecast(res.prices, horizon=int(horizon), fit_last=int(fit_last))
-        fig.add_trace(go.Scatter(x=fc.index, y=fc["yhat"], mode="lines", name="Forecast (yhat)", line=dict(dash="dash")), secondary_y=False)
-        fig.add_trace(go.Scatter(x=fc.index, y=fc["hi"], mode="lines", name="Forecast Upper", line=dict(dash="dot")), secondary_y=False)
-        fig.add_trace(go.Scatter(x=fc.index, y=fc["lo"], mode="lines", name="Forecast Lower", line=dict(dash="dot")), secondary_y=False)
-    except Exception as e:
-        st.warning(f"Forecast failed: {e}")
+with tab1:
+    st.subheader("Price & Strategy Equity")
+    
+    # Main chart: raw price + strategy equity
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(x=res.prices.index, y=res.prices.values, mode="lines", name=f"Price ({label})"),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(x=res.equity.index, y=res.equity.values, mode="lines", name=f"Strategy Value (Base 100)"),
+        secondary_y=True,
+    )
 
-fig.update_layout(
-    title="Raw Price vs. Cumulative Strategy Equity",
-    xaxis_title="Time",
-    legend_title="Series",
-)
-fig.update_yaxes(title_text=f"Price ({vs.upper()})", secondary_y=False)
-fig.update_yaxes(title_text="Strategy Value (Base 100)", secondary_y=True)
+    # Optional Linear Forecast
+    if enable_forecast:
+        try:
+            fc = simple_linear_forecast(res.prices, horizon=int(horizon), fit_last=int(fit_last))
+            fig.add_trace(go.Scatter(x=fc.index, y=fc["yhat"], mode="lines", name="Forecast (yhat)", line=dict(dash="dash", color="green")), secondary_y=False)
+            fig.add_trace(go.Scatter(x=fc.index, y=fc["hi"], mode="lines", name="Forecast Upper", line=dict(dash="dot", width=1, color="green"), showlegend=False), secondary_y=False)
+            fig.add_trace(go.Scatter(x=fc.index, y=fc["lo"], mode="lines", name="Forecast Lower", line=dict(dash="dot", width=1, color="green"), showlegend=False), secondary_y=False)
+        except Exception as e:
+            st.warning(f"Forecast failed: {e}")
 
-st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        title="Raw Price vs. Cumulative Strategy Equity",
+        xaxis_title="Time",
+        legend_title="Series",
+        hovermode="x unified"
+    )
+    fig.update_yaxes(title_text=f"Price ({vs.upper()})", secondary_y=False)
+    fig.update_yaxes(title_text="Strategy Value (Base 100)", secondary_y=True)
 
-# --- 24h Stats Section
-st.subheader("24h Price Statistics")
-c6, c7, c8, c9 = st.columns(4)
-c6.metric("24h Open", f"{oc['open_24h']:.2f}")
-c7.metric("24h Close", f"{oc['close_24h']:.2f}")
-c8.metric("24h Return", f"{oc['return_24h']*100:.2f}%")
-c9.metric("Est. Ann. Volatility", f"{vol['ann_vol_est']*100:.2f}%")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-# --- Data Table
-with st.expander("View Latest Values"):
+with tab2:
+    # 24h Stats in the Data Tab
+    st.subheader("24h Price Statistics")
+    c6, c7, c8, c9 = st.columns(4)
+    c6.metric("24h Open", f"{oc['open_24h']:.2f}")
+    c7.metric("24h Close", f"{oc['close_24h']:.2f}")
+    c8.metric("24h Return", f"{oc['return_24h']*100:.2f}%")
+    c9.metric("Est. Ann. Volatility", f"{vol['ann_vol_est']*100:.2f}%")
+
+    st.divider()
+
+    st.subheader("Latest Data Points")
     df = pd.DataFrame({"price": res.prices, "equity": res.equity, "position": res.position})
-    st.dataframe(df.tail(30))
+    st.dataframe(df.tail(50), use_container_width=True)
