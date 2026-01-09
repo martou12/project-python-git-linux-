@@ -31,24 +31,7 @@ def _apply_costs_and_build_equity(
     equity_t = equity_{t-1} * (1 + leverage * pos_{t-1} * ret_t - turnover_t * cost)
     cost in bps applied on turnover (abs change in position)
     """
-    equity = (prices / prices.iloc[0]) * 100.0
-    pos = pd.Series(1.0, index=prices.index, name="position")
-    return equity, pos
-
-
-def _momentum(prices: pd.Series, lookback: int = 20) -> tuple[pd.Series, pd.Series]:
-    """
-    Momentum simple:
-    - signal = 1 si return sur lookback > 0, sinon 0 (cash)
-    - on shift le signal pour éviter look-ahead
-    """
-    if lookback < 1:
-        raise ValueError("lookback must be >= 1")
-
-    ret_lb = prices / prices.shift(lookback) - 1.0
-    signal = (ret_lb > 0).astype(float)
-    position = signal.shift(1).fillna(0.0)
-
+    prices = prices.sort_index()
     rets = prices.pct_change().fillna(0.0)
 
     pos = position.fillna(0.0).astype(float).clip(-1.0, 1.0)
@@ -84,7 +67,7 @@ def _momentum(prices: pd.Series, lookback: int, allow_short: bool) -> pd.Series:
 
 def _sma_crossover(prices: pd.Series, short: int, long: int, allow_short: bool):
     if short < 1 or long < 2 or short >= long:
-        raise ValueError("Paramètres SMA not valid (we nedd 1 <= short < long)")
+        raise ValueError("Need 1 <= short < long")
 
     sma_s = prices.rolling(short).mean()
     sma_l = prices.rolling(long).mean()
@@ -116,8 +99,8 @@ def build_single_asset_result(
     (prices_raw, meta) = fetch_price_series(asset_id, vs=vs, days=days, return_meta=True)
     prices = resample_price(prices_raw, periodicity)
 
-    if len(prices) < 10:
-        raise RuntimeError("not enough points for  backtesting (increase days ou put periodicity=raw).")
+    if len(prices) < 20:
+        raise RuntimeError("Not enough points. Increase days or use periodicity=raw")
 
     params = {
         "days": int(days),
@@ -140,7 +123,22 @@ def build_single_asset_result(
         params["sma_short"] = int(sma_short)
         params["sma_long"] = int(sma_long)
     else:
-        raise ValueError(f"unknown strategy: {strategy}")
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+    equity = _apply_costs_and_build_equity(
+        prices=prices,
+        position=pos,
+        leverage=float(leverage),
+        fee_bps=float(fee_bps),
+        slippage_bps=float(slippage_bps),
+    )
+
+    # trade stats + keep meta about source/cache
+    meta = {**meta, **trade_stats(pos)}
+
+    # SMA overlay for UI (optional)
+    if sma_s is not None and sma_l is not None:
+        meta = {**meta, "sma_short": sma_s, "sma_long": sma_l}
 
     return SingleAssetResult(
         asset_id=asset_id,
