@@ -101,7 +101,6 @@ fig.add_trace(
     secondary_y=True,
 )
 
-# Forecast (optionnel) sur prix brut
 if enable_forecast:
     try:
         fc = simple_linear_forecast(res.prices, horizon=int(horizon), fit_last=int(fit_last))
@@ -121,7 +120,7 @@ fig.update_yaxes(title_text="Valeur stratégie (base 100)", secondary_y=True)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# --- Infos 24h
+# Infos 24h
 st.subheader("Stats 24h (prix)")
 c6, c7, c8, c9 = st.columns(4)
 c6.metric("Open 24h", f"{oc['open_24h']:.2f}")
