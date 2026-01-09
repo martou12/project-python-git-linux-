@@ -6,11 +6,11 @@ def compute_metrics(series: pd.Series, rf_annual: float = 0.0) -> dict:
     Calculates standard financial metrics.
     Returns a dictionary with GUARANTEED keys for the interface to avoid KeyErrors.
     """
-    # 1. Safety check: If series is empty or too short
+    # 1. Safety check
     if series.empty or len(series) < 2:
         return {
             "ann_return": 0.0,
-            "cagr": 0.0,  # Alias for compatibility with friend's code
+            "cagr": 0.0,
             "ann_vol": 0.0,
             "sharpe": 0.0,
             "max_dd": 0.0,
@@ -22,10 +22,9 @@ def compute_metrics(series: pd.Series, rf_annual: float = 0.0) -> dict:
     if rets.empty:
         return {"ann_return": 0.0, "cagr": 0.0, "ann_vol": 0.0, "sharpe": 0.0, "max_dd": 0.0}
 
-    # 3. Annualization (Based on median time step)
+    # 3. Annualisation
     dt = series.index.to_series().diff().dropna().median()
     if pd.isna(dt):
-        # Fallback if single data point or irregular time step -> default to 1 day
         seconds = 24 * 3600
     else:
         seconds = max(dt.total_seconds(), 1.0)
@@ -34,7 +33,6 @@ def compute_metrics(series: pd.Series, rf_annual: float = 0.0) -> dict:
 
     # --- CAGR / Annual Return ---
     total_ret = (series.iloc[-1] / series.iloc[0]) - 1.0
-    # Duration in years
     duration_years = (series.index[-1] - series.index[0]).total_seconds() / (365.25 * 24 * 3600)
     
     if duration_years > 0:
@@ -46,7 +44,6 @@ def compute_metrics(series: pd.Series, rf_annual: float = 0.0) -> dict:
     ann_vol = rets.std(ddof=1) * np.sqrt(periods_per_year)
 
     # --- Sharpe Ratio ---
-    # rf_period = rf_annual / periods_per_year (approx)
     mu = rets.mean() * periods_per_year
     sigma = ann_vol
     if sigma > 1e-9:
@@ -61,11 +58,30 @@ def compute_metrics(series: pd.Series, rf_annual: float = 0.0) -> dict:
 
     return {
         "ann_return": ann_return,
-        "cagr": ann_return,      # DUPLICATED: Ensures compatibility if friend uses 'cagr'
+        "cagr": ann_return,      # Compatible alias
         "ann_vol": ann_vol,
         "sharpe": sharpe,
         "max_dd": max_dd,
-        "sortino": 0.0           # Placeholder if requested later
+        "sortino": 0.0
+    }
+
+
+def trade_stats(position: pd.Series) -> dict:
+    """
+    Calculates basic trade statistics (Count, etc.).
+    RESTORED: Required by Quant A logic.
+    """
+    if position.empty:
+        return {"total_trades": 0, "win_rate": 0.0}
+
+    # Count every time the position changes (signal change)
+    trades = position.diff().fillna(0.0)
+    # Count non-zero changes
+    num_trades = int((trades != 0).sum())
+
+    return {
+        "total_trades": num_trades,
+        "win_rate": 0.0 # Placeholder to prevent errors if friend uses it
     }
 
 
@@ -79,14 +95,10 @@ def open_close_return_24h(prices: pd.Series) -> dict:
     last_ts = prices.index[-1]
     cutoff = last_ts - pd.Timedelta(hours=24)
     
-    # Current price
     close_val = float(prices.iloc[-1])
     
-    # Price 24h ago (or closest data point before that)
-    # Get points <= cutoff, take the last available one
     past = prices[prices.index <= cutoff]
     if past.empty:
-        # If not enough history, take the very first data point
         open_val = float(prices.iloc[0])
     else:
         open_val = float(past.iloc[-1])
@@ -106,16 +118,16 @@ def realized_vol(prices: pd.Series, window: int = 20) -> dict:
     """
     rets = prices.pct_change().dropna()
     if len(rets) < window:
-        vol_est = rets.std() * np.sqrt(365*24) # Rough approximation
+        vol_est = rets.std() * np.sqrt(365*24)
     else:
-        vol_est = rets.tail(window).std() * np.sqrt(365*24) # Approx hourly -> yearly
+        vol_est = rets.tail(window).std() * np.sqrt(365*24)
         
     return {"ann_vol_est": 0.0 if pd.isna(vol_est) else vol_est}
 
 
 def drawdown_series(equity: pd.Series) -> pd.Series:
     """
-    Calculates the drawdown series (percentage drop from peak).
+    Calculates the drawdown series.
     """
     roll_max = equity.cummax()
     dd = (equity / roll_max) - 1.0
