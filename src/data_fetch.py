@@ -12,7 +12,7 @@ DATA_DIR.mkdir(exist_ok=True)
 
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
-# (Même mapping que Quant B, tu peux en ajouter si tu veux)
+
 ASSET_MAP = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -34,7 +34,7 @@ def _coingecko_market_chart(
     Fetch CoinGecko market_chart:
     - cache CSV local (data/)
     - retry + backoff sur erreurs temporaires / 429
-    - fallback sur cache même si vieux si API HS
+    
     """
     cache_path = DATA_DIR / f"{coin_id}_{vs}_{days}d.csv"
 
