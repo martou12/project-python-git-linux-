@@ -6,14 +6,15 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
+# Import internal modules
 from src.data_fetch import ASSET_MAP
 from src.metrics import compute_metrics, open_close_return_24h, realized_vol, drawdown_series
 from src.quant_a_single_asset import build_single_asset_result, simple_linear_forecast
 
-# Page Configuration
+# --- Page Configuration ---
 st.set_page_config(page_title="Single Asset (Quant A)", layout="wide")
 
-# Auto-refresh every 5 minutes
+# Auto-refresh every 5 minutes (300000ms)
 st_autorefresh(interval=5 * 60 * 1000, key="single_asset_refresh")
 
 st.title("Single Asset Analysis (Quant A) — Univariate")
@@ -22,9 +23,11 @@ st.title("Single Asset Analysis (Quant A) — Univariate")
 with st.sidebar:
     st.header("Settings")
 
+    # Asset Selection
     label = st.selectbox("Asset", options=list(ASSET_MAP.keys()), index=0)
     asset_id = ASSET_MAP[label]
 
+    # General Parameters
     vs = st.selectbox("Currency", ["eur", "usd"], index=0)
     days = st.selectbox("History (days)", [1, 7, 30, 90, 180, 365], index=2)
 
@@ -37,14 +40,8 @@ with st.sidebar:
 
     strategy = st.selectbox("Strategy", ["Buy & Hold", "Momentum", "SMA Crossover"], index=1)
 
-    st.subheader("Backtest (pro)")
-    allow_short = st.checkbox("Autoriser short (long/short)", value=False)
-    leverage = st.slider("Leverage", min_value=0.5, max_value=3.0, value=1.0, step=0.1)
-
-    fee_bps = st.slider("Frais (bps)", 0.0, 50.0, 5.0, 0.5)
-    slippage_bps = st.slider("Slippage (bps)", 0.0, 50.0, 5.0, 0.5)
-
-    st.subheader("Paramètres stratégie")
+    # --- Strategy Parameters ---
+    st.subheader("Strategy Parameters")
     lookback = 20
     sma_short, sma_long = 10, 30
 
@@ -55,14 +52,29 @@ with st.sidebar:
         sma_short = st.number_input("SMA Short Window", min_value=1, max_value=500, value=10, step=1)
         sma_long = st.number_input("SMA Long Window", min_value=2, max_value=1000, value=30, step=1)
 
+    # --- Advanced Settings (UI Only for now) ---
+    st.divider()
+    st.caption("Advanced Backtest Settings (Not active in basic backend)")
+    allow_short = st.checkbox("Allow Short Selling", value=False, disabled=True)
+    leverage = st.slider("Leverage", min_value=0.5, max_value=3.0, value=1.0, step=0.1, disabled=True)
+    fee_bps = st.slider("Fees (bps)", 0.0, 50.0, 5.0, 0.5, disabled=True)
+
+    # --- Extra Features ---
     st.divider()
     st.subheader("Extra Features (Optional)")
     enable_forecast = st.checkbox("Show Linear Forecast (Price)", value=False)
     horizon = st.number_input("Forecast Horizon (points)", min_value=5, max_value=200, value=20, step=5)
     fit_last = st.number_input("Fit on last N points", min_value=50, max_value=2000, value=200, step=50)
 
+
+# --- Caching & Computation ---
 @st.cache_data(ttl=300, show_spinner=False)
-def cached_res(asset_id, vs, days, periodicity, strategy, lookback, sma_short, sma_long, allow_short, leverage, fee_bps, slippage_bps):
+def cached_res(asset_id, vs, days, periodicity, strategy, lookback, sma_short, sma_long):
+    """
+    Wrapper to call the backend logic. 
+    Note: Advanced params (leverage, fees) are removed from the call 
+    to ensure compatibility with the current backend.
+    """
     return build_single_asset_result(
         asset_id=asset_id,
         vs=vs,
@@ -71,27 +83,25 @@ def cached_res(asset_id, vs, days, periodicity, strategy, lookback, sma_short, s
         strategy=strategy,
         lookback=int(lookback),
         sma_short=int(sma_short),
-        sma_long=int(sma_long),
-        allow_short=bool(allow_short),
-        leverage=float(leverage),
-        fee_bps=float(fee_bps),
-        slippage_bps=float(slippage_bps),
+        sma_long=int(sma_long)
     )
 
 try:
+    # Run the backtest
     res = cached_res(asset_id, vs, days, periodicity, strategy, lookback, sma_short, sma_long)
 except Exception as e:
     st.error(f"Data/Backtest Error: {e}")
     st.stop()
 
-#  Metrics Calculation 
+# --- Metrics Calculation ---
+rf = 0.0  # Risk-free rate assumption
 price_now = float(res.prices.iloc[-1])
-kpi = compute_metrics(res.equity, rf_annual=float(rf))
+kpi = compute_metrics(res.equity) # Ensure your metrics.py handles defaults or pass rf if needed
 oc = open_close_return_24h(res.prices)
 vol = realized_vol(res.prices)
 dd = drawdown_series(res.equity)
 
-#  KPIs Section with Deltas 
+# --- KPIs Section with Deltas ---
 c1, c2, c3, c4, c5 = st.columns(5)
 
 # Price with 24h variation delta
@@ -107,27 +117,31 @@ c5.metric("Max Drawdown", f"{kpi['max_dd']*100:.2f}%", delta_color="inverse") # 
 
 st.caption(
     f"Last update: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} "
-    f"(5 min auto-refresh) — strategy: {res.strategy_name} — params: {res.params}"
+    f"(5 min auto-refresh) — Strategy: {res.strategy_name} — Params: {res.params}"
 )
 
-# --- Layout with Tabs ---
-tab1, tab2 = st.tabs([" Visualization & Strategy", " Raw Data & Stats"])
+# --- Main Layout with Tabs ---
+tab1, tab2 = st.tabs(["Visualization & Strategy", "Raw Data & Stats"])
 
 with tab1:
     st.subheader("Price & Strategy Equity")
     
     # Main chart: raw price + strategy equity
     fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Trace 1: Asset Price
     fig.add_trace(
         go.Scatter(x=res.prices.index, y=res.prices.values, mode="lines", name=f"Price ({label})"),
         secondary_y=False,
     )
+    
+    # Trace 2: Strategy Equity
     fig.add_trace(
         go.Scatter(x=res.equity.index, y=res.equity.values, mode="lines", name=f"Strategy Value (Base 100)"),
         secondary_y=True,
     )
 
-    # Optional Linear Forecast
+    # Optional Linear Forecast Overlay
     if enable_forecast:
         try:
             fc = simple_linear_forecast(res.prices, horizon=int(horizon), fit_last=int(fit_last))
@@ -160,5 +174,10 @@ with tab2:
     st.divider()
 
     st.subheader("Latest Data Points")
-    df = pd.DataFrame({"price": res.prices, "equity": res.equity, "position": res.position})
-    st.dataframe(df.tail(50), use_container_width=True)
+    # Combine data for display
+    df_display = pd.DataFrame({
+        "Price": res.prices, 
+        "Equity (Strat)": res.equity, 
+        "Position": res.position
+    })
+    st.dataframe(df_display.tail(50), use_container_width=True)
