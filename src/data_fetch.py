@@ -136,12 +136,20 @@ def fetch_price_series(
     raise last_err
 
 
-def fetch_price_series(coin_id: str, vs: str = "eur", days: int = 30) -> pd.Series:
+def fetch_price_series(coin_id: str, vs: str = "eur", days: int = 30, return_meta: bool = False, **kwargs):
     """
-    Public wrapper to get a clean price series (datetime index) for a single asset.
+    Public wrapper to get a clean price series.
+    Compatible with both Quant A (needs meta) and Quant B (needs just prices).
     """
     s = _coingecko_market_chart(coin_id, vs=vs, days=days)
-    return s.dropna().astype(float)
+    s = s.dropna().astype(float)
+    
+    
+    if return_meta:
+        return s, {"source": "CoinGecko", "currency": vs, "days": days}
+        
+    
+    return s
 
 
 def resample_price(s: pd.Series, rule: str) -> pd.Series:
