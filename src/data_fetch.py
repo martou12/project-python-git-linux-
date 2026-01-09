@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import time
-import requests
-import pandas as pd
+from pathlib import Path
+from typing import Optional, Tuple
 
 # Define the local directory for caching CSV files
 DATA_DIR = Path("data")
@@ -23,8 +21,29 @@ ASSET_MAP = {
     "Cardano (ADA)": "cardano",
 }
 
+_DEFAULT_HEADERS = {
+    "User-Agent": "project-python-git-linux (student dashboard) - contact: none",
+    "Accept": "application/json",
+}
 
-def _coingecko_market_chart(
+
+def _read_cache(path: Path) -> Optional[pd.Series]:
+    if not path.exists():
+        return None
+    df = pd.read_csv(path, parse_dates=["datetime"])
+    if df.empty or "price" not in df.columns:
+        return None
+    s = df.set_index("datetime")["price"].astype(float).sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    return s
+
+
+def _write_cache(path: Path, s: pd.Series) -> None:
+    out = s.to_frame("price").reset_index().rename(columns={"index": "datetime"})
+    out.to_csv(path, index=False)
+
+
+def fetch_price_series(
     coin_id: str,
     vs: str = "eur",
     days: int = 30,
@@ -37,25 +56,33 @@ def _coingecko_market_chart(
     - Implements retry logic + exponential backoff for temporary network errors or Rate Limits (429).
     - Returns a pandas Series with a DateTime index.
     """
+    if vs not in {"eur", "usd"}:
+        raise ValueError("vs must be 'eur' or 'usd'")
+    if days <= 0:
+        raise ValueError("days must be > 0")
+
     cache_path = DATA_DIR / f"{coin_id}_{vs}_{days}d.csv"
 
     # 1) Check for "fresh" cache (file exists and is recent enough)
     if cache_path.exists():
         age = time.time() - cache_path.stat().st_mtime
-        if age <= max_age_sec:
-            df = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime")
-            s = df["price"].astype(float)
-            s.name = coin_id
-            return s
+        if age <= ttl_sec:
+            s = _read_cache(cache_path)
+            if s is not None and len(s) > 2:
+                meta = {"source": "cache_fresh", "cache_path": str(cache_path), "age_sec": age}
+                return (s, meta) if return_meta else s
+
+    sess = session or requests.Session()
+    sess.headers.update(_DEFAULT_HEADERS)
 
     # 2) If no cache, prepare API request
     url = f"{COINGECKO_BASE}/coins/{coin_id}/market_chart"
-    params = {"vs_currency": vs, "days": days}
+    params = {"vs_currency": vs, "days": int(days)}
 
     last_err = None
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=20)
+            r = sess.get(url, params=params, timeout=25)
 
             # Handle Rate Limiting (HTTP 429)
             if r.status_code == 429:
@@ -77,6 +104,7 @@ def _coingecko_market_chart(
             df = pd.DataFrame(prices, columns=["ts_ms", "price"])
             # Convert timestamp (ms) to datetime
             df["datetime"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True).dt.tz_convert(None)
+            s = df.set_index("datetime")["price"].astype(float).sort_index()
 
             # Clean and sort index
             s = df.set_index("datetime")["price"].sort_index()
@@ -84,7 +112,9 @@ def _coingecko_market_chart(
             # Align timestamps to minutes and remove duplicates
             s.index = s.index.floor("1min")
             s = s[~s.index.duplicated(keep="last")]
-            s.name = coin_id
+            s = s.dropna()
+            if len(s) < 5:
+                raise RuntimeError("Not enough points returned.")
 
             # Save to local cache for next time
             s.to_frame("price").to_csv(cache_path)
